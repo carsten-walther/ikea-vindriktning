@@ -1,0 +1,312 @@
+################################################################################
+#
+# Project Settings
+#
+################################################################################
+
+substitutions:
+  project_name: ikea-vindriktning
+  author_name: carsten-walther
+  friendly_name: Ikea Vindriktning
+  comment: Ikea Vindriktning - Luft-/Klimaüberwachung
+  version: 2026.9.14
+  area: Miscellaneous
+
+##########################################################################################
+#
+# General Settings
+#
+##########################################################################################
+
+#
+# https://esphome.io/components/esphome
+#
+esphome:
+  name: "${project_name}"
+  friendly_name: "${friendly_name}"
+  comment: "${comment}"
+  area: "${area}"
+
+  project:
+    name: "${author_name}.${project_name}"
+    version: "${version}"
+
+#
+# https://esphome.io/components/esp32
+#
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    # esp-idf, not arduino: with the arduino framework the libsodium stub that
+    # arduino-esp32 pulls in shadows esphome/libsodium, which breaks the
+    # noise-c build required by "api: encryption" (ESPHome 2026.7.x).
+    # Consequence: no Arduino-only APIs (String, WiFi.*) in any lambda here.
+    type: esp-idf
+
+#
+# https://esphome.io/components/api
+#
+api:
+  # Enable transport encryption of the API layer.
+  encryption:
+    # The pre-shared key for the encryption.
+    key: !secret api_encryption_key
+  # 0s disables the automatic reboot when Home Assistant is unreachable: this
+  # node keeps measuring and publishing via MQTT even without an API client
+  reboot_timeout: 0s
+
+#
+# https://esphome.io/components/mqtt
+#
+mqtt:
+  id: mqtt_client_id
+  broker: !secret mqtt_broker
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  reboot_timeout: 0s
+  enable_on_boot: False
+  discovery: False
+  keepalive: 60s
+
+#
+# https://esphome.io/components/web_server
+#
+web_server:
+  port: 80
+  version: 3
+  local: True
+  
+#
+# https://esphome.io/components/wifi
+#
+wifi:
+  id: wifi_id
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  domain: .local
+  fast_connect: True
+  power_save_mode: NONE
+  enable_on_boot: True
+  ap:
+    ssid: "${project_name}"
+    password: !secret wifi_ap_password
+
+#
+# https://esphome.io/components/captive_portal
+#
+captive_portal:
+
+#
+# Only the classic push OTA from the dashboard: this node has no display to
+# show progress on, so the http_request pull path is not worth the flash.
+#
+ota:
+  #
+  # https://esphome.io/components/ota/esphome
+  #
+  - platform: esphome
+    password: !secret ota_password
+
+#
+# https://esphome.io/components/time
+#
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: Europe/Berlin
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+      - 2.pool.ntp.org
+
+#
+# https://esphome.io/components/logger
+#
+logger:
+  level: ERROR
+
+##########################################################################################
+#
+# Specific Settings
+#
+##########################################################################################
+
+i2c:
+  sda: GPIO06
+  scl: GPIO07
+  scan: False
+  id: i2c_bus
+
+uart:
+  rx_pin: GPIO20
+  tx_pin: GPIO21
+  baud_rate: 9600
+
+text_sensor:
+  - platform: version
+    name: ESPHome Version
+    icon: mdi:new-box
+  
+  - platform: template
+    name: Firmware Version
+    icon: mdi:new-box
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: |-
+      return {"$version"};
+  
+  - platform: wifi_info
+    ssid:
+      name: SSID
+      icon: mdi:wifi-star
+    ip_address:
+      name: IP Address
+      icon: mdi:ip-network-outline
+    dns_address:
+      name: DNS Address
+      icon: mdi:dns-outline
+  
+  - platform: template
+    name: "Device Uptime"
+    entity_category: diagnostic
+    device_class: ""
+    lambda: |-
+          int seconds = (id(uptime_seconds_id).state);
+          int days = seconds / (24 * 3600);
+
+          seconds = seconds % (24 * 3600);
+
+          int hours = seconds / 3600;
+          seconds = seconds % 3600;
+
+          int minutes = seconds /  60;
+          seconds = seconds % 60;
+
+          // an implausibly large uptime means the sensor has no reading yet
+          if (days > 3650) {
+            return {"Starting up"};
+          }
+
+          char buf[32];
+          if (days) {
+            snprintf(buf, sizeof(buf), "%dd %dh %dm %ds", days, hours, minutes, seconds);
+          } else if (hours) {
+            snprintf(buf, sizeof(buf), "%dh %dm %ds", hours, minutes, seconds);
+          } else if (minutes) {
+            snprintf(buf, sizeof(buf), "%dm %ds", minutes, seconds);
+          } else {
+            snprintf(buf, sizeof(buf), "%ds", seconds);
+          }
+          return {buf};
+    icon: mdi:clock-start
+
+binary_sensor:
+  - platform: status
+    name: Connection Status
+    icon: mdi:connection
+
+button:
+  - platform: restart
+    id: restart_id
+    name: Restart
+    icon: mdi:reload
+    
+  - platform: factory_reset
+    id: factoryreset_id
+    name: Factory Reset
+    icon: mdi:restart
+    
+  - platform: safe_mode
+    id: safemode_id
+    name: Restart (Safe Mode)
+    icon: mdi:reload
+
+sensor:
+  - platform: uptime
+    id: uptime_seconds_id
+    name: Uptime
+    icon: mdi:timer-outline
+    type: seconds
+    internal: True
+    entity_category: diagnostic
+    device_class: ""
+    
+  - platform: wifi_signal
+    id: wifi_signal_db
+    name: WiFi Signal (dBm)
+    icon: mdi:wifi
+    entity_category: diagnostic
+    device_class: ""
+    unit_of_measurement: "dBm"
+    update_interval: 60s
+    
+  - platform: copy
+    id: wifi_signal_percent
+    name: WiFi Signal (%)
+    icon: mdi:wifi
+    source_id: wifi_signal_db
+    unit_of_measurement: "%"
+    entity_category: diagnostic
+    device_class: ""
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+
+  - platform: pm1006
+    pm_2_5:
+      name: Particulate Matter 2.5µm Concentration
+    update_interval: 60s
+
+  - platform: bmp280_i2c
+    i2c_id: i2c_bus
+    address: 0x77
+    iir_filter: 16X
+    update_interval: 60s
+    temperature:
+      name: Temperature (BMP280)
+      id: bmp280_temperature
+      icon: mdi:thermometer
+      oversampling: 16x
+    pressure:
+      name: Pressure
+      id: bmp280_pressure
+      icon: mdi:gauge
+
+  - platform: aht10
+    variant: AHT20
+    update_interval: 60s
+    temperature:
+      name: Temperature (AHT20)
+      id: aht20_temperature
+      icon: mdi:thermometer
+    humidity:
+      name: Humidity
+      id: aht20_humidity
+      icon: mdi:water-percent
+
+  - platform: combination
+    type: median
+    name: Temperature
+    id: temperature
+    icon: mdi:thermometer
+    unit_of_measurement: °C
+    sources:
+      - source: bmp280_temperature
+      - source: aht20_temperature
+
+  - platform: template
+    name: Dew Point
+    id: dew_point
+    device_class: temperature
+    unit_of_measurement: °C
+    icon: mdi:thermometer-alert
+    accuracy_decimals: 2
+    lambda: |-
+      return (243.5 * (log(id(aht20_humidity).state / 100) + ((17.67 * id(temperature).state) / (243.5 + id(temperature).state))) / (17.67 - log(id(aht20_humidity).state / 100) - ((17.67 * id(temperature).state) / (243.5 + id(temperature).state))));
+
+  - platform: absolute_humidity
+    name: Absolute Humidity
+    id: absolute_humidity_id
+    icon: mdi:water-percent-alert
+    temperature: temperature
+    humidity: aht20_humidity
+    unit_of_measurement: g/m³
