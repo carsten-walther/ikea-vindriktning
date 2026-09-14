@@ -124,18 +124,33 @@ wifi:
   password: !secret wifi_password
   domain: .local
 
-  # Skips the scan and associates with the first AP that answers for the
-  # SSID - the only way to associate with a hidden network, and a liability
-  # with more than one AP on the same SSID, which then sticks to whoever
-  # replies first rather than to the strongest.
-  fast_connect: True
+  # False, not the True this had. fast_connect skips the scan and associates
+  # with the first AP that answers for the SSID - the only way to associate
+  # with a hidden network, and a liability on any other: with more than one
+  # access point on the same SSID the device sticks to whoever replies first
+  # rather than to the strongest. Check the BSSID and WiFi Signal (dBm)
+  # entities if picking the better AP turns out to matter here.
+  #
+  # Put it back to True if this SSID is hidden - fast_connect is the only way
+  # to associate with one.
+  fast_connect: False
 
-  # Keeps the radio powered up between beacons instead of sleeping for them,
-  # trading power/heat for no inbound-traffic latency. See infinity.yaml's
-  # wifi: section for a case where that trade went the other way.
-  power_save_mode: NONE
+  # LIGHT, not the NONE this had: NONE keeps the radio powered up permanently,
+  # which measurably raises the case temperature - the BMP280/AHT20 sit in the
+  # same enclosure as the ESP32. LIGHT sleeps between DTIM beacons and wakes
+  # for every one of them, at the cost of delaying only INBOUND traffic by
+  # roughly one beacon interval - outbound (the sensor publishes that make up
+  # almost all of this node's traffic) is unaffected. If OTA updates start
+  # failing, this is the first line to put back to NONE.
+  power_save_mode: LIGHT
 
   enable_on_boot: True
+
+  # Reduced from the ~20 dBm default. Whether this is safe to keep depends on
+  # WiFi Signal (dBm): a weak link plus reduced output power means retransmits,
+  # which cost more airtime than the lower power saves. Raise it back towards
+  # 20 dB if that entity looks poor after this change.
+  output_power: 12dB
   ap:
     ssid: "${project_name}"
     password: !secret wifi_ap_password

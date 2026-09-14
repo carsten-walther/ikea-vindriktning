@@ -142,10 +142,10 @@ the sibling `infinity`/`odb2-sniffer` boards. That matters here because
 would leave no way back in short of a serial reflash. `esp_reset_reason()` is
 read directly instead, same value, no component in the RF path.
 
-`BSSID` pairs with `wifi: fast_connect: True`: that setting associates with
-the first access point that answers for the SSID rather than the strongest
-one, so with more than one AP on the same network name, `BSSID` is what shows
-which one the device actually picked.
+`BSSID` shows which access point the device actually associated with — useful
+on its own with more than one AP on the same SSID, and specifically relevant
+if `wifi: fast_connect` is ever turned back on, since that setting associates
+with the first AP that answers rather than the strongest one.
 
 ### Buttons
 
