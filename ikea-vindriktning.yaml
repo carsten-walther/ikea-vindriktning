@@ -1,8 +1,7 @@
-################################################################################
-#
-# Project Settings
-#
-################################################################################
+# ═══════════════════════════════════════════════════════════
+#  Ikea Vindriktning
+#  Air Quality Monitor | MQTT | Home Assistant
+# ═══════════════════════════════════════════════════════════
 
 substitutions:
   project_name: ikea-vindriktning
@@ -12,11 +11,19 @@ substitutions:
   version: 2026.9.14
   area: Miscellaneous
 
-##########################################################################################
-#
-# General Settings
-#
-##########################################################################################
+  # How often the air-quality and diagnostic sensors below poll and publish.
+  update_interval: 60s
+
+  #
+  # GPIOs
+  #
+  # Neither pair is in the C3's strapping set (GPIO02, GPIO08, GPIO09) - see
+  # the i2c: and uart: sections below.
+  #
+  PIN_I2C_SDA: GPIO06
+  PIN_I2C_SCL: GPIO07
+  PIN_UART_RX: GPIO20
+  PIN_UART_TX: GPIO21
 
 #
 # https://esphome.io/components/esphome
@@ -30,6 +37,29 @@ esphome:
   project:
     name: "${author_name}.${project_name}"
     version: "${version}"
+
+  on_boot:
+    # A restoring global is a component with setup_priority::HARDWARE;
+    # incrementing at the same priority races the load() that reads the
+    # stored value - the increment could land on the initial 0 and then be
+    # overwritten by the restore, so the count would never grow. 700 is
+    # safely after every HARDWARE component.
+    - priority: 700
+      then:
+        - lambda: |-
+            id(reset_count_id) += 1;
+
+    # Firmware Version, Reset Count and Reset Reason cannot change while the
+    # device is up - the version is compiled in, the counter was just
+    # incremented above, and esp_reset_reason() latches its answer at reset -
+    # so all three are pushed once here instead of polled. publish_state does
+    # not deduplicate, so polling them would resend an unchanged value over
+    # the api/mqtt every update_interval for the lifetime of the device.
+    - priority: -100
+      then:
+        - component.update: firmware_version_id
+        - component.update: reset_count_sensor_id
+        - component.update: reset_reason_id
 
 #
 # https://esphome.io/components/esp32
@@ -64,7 +94,14 @@ mqtt:
   username: !secret mqtt_username
   password: !secret mqtt_password
   reboot_timeout: 0s
+
+  # Off at boot, and only turned on again by the MQTT switch below - see the
+  # switch: section for why enable_on_boot and its restore_mode have to stay
+  # in step.
   enable_on_boot: False
+
+  # No autodiscovery: this device is added through the native API integration,
+  # so discovery would only publish retained config topics nobody consumes.
   discovery: False
   keepalive: 60s
 
@@ -74,8 +111,10 @@ mqtt:
 web_server:
   port: 80
   version: 3
+  # Assets served from flash instead of a CDN, so the page also works on the
+  # fallback access point, which has no route to the internet.
   local: True
-  
+
 #
 # https://esphome.io/components/wifi
 #
@@ -84,8 +123,18 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   domain: .local
+
+  # Skips the scan and associates with the first AP that answers for the
+  # SSID - the only way to associate with a hidden network, and a liability
+  # with more than one AP on the same SSID, which then sticks to whoever
+  # replies first rather than to the strongest.
   fast_connect: True
+
+  # Keeps the radio powered up between beacons instead of sleeping for them,
+  # trading power/heat for no inbound-traffic latency. See infinity.yaml's
+  # wifi: section for a case where that trade went the other way.
   power_save_mode: NONE
+
   enable_on_boot: True
   ap:
     ssid: "${project_name}"
@@ -108,68 +157,130 @@ ota:
     password: !secret ota_password
 
 #
-# https://esphome.io/components/time
-#
-time:
-  - platform: sntp
-    id: sntp_time
-    timezone: Europe/Berlin
-    servers:
-      - 0.pool.ntp.org
-      - 1.pool.ntp.org
-      - 2.pool.ntp.org
-
-#
 # https://esphome.io/components/logger
 #
 logger:
   level: ERROR
 
-##########################################################################################
 #
-# Specific Settings
+# https://esphome.io/components/globals
 #
-##########################################################################################
+globals:
+  # Survives restarts, so a rising count is proof the device rebooted even if
+  # nobody was watching the log. Counts every restart alike - OTA, the
+  # Restart button, a power cut and a watchdog are indistinguishable here,
+  # which is why Reset Reason sits next to it. A factory reset clears it
+  # back to 0.
+  - id: reset_count_id
+    type: int
+    restore_value: yes
+    initial_value: '0'
 
+#
+# https://esphome.io/components/i2c
+#
+# BMP280 (0x77) and AHT20 (0x38, fixed address) share this bus.
+# scan is off because both addresses are already known, and off by default
+# also costs a moment less at every boot.
+#
+# ${PIN_I2C_SDA}/${PIN_I2C_SCL} are not strapping pins on the C3 - the
+# strapping set is GPIO02, GPIO08 and GPIO09 - so a bus fault here (an
+# unpowered or miswired module holding a line low) is a bus error, not a boot
+# into the ROM bootloader. See infinity.yaml for the board where that
+# distinction mattered.
+#
 i2c:
-  sda: GPIO06
-  scl: GPIO07
+  sda: ${PIN_I2C_SDA}
+  scl: ${PIN_I2C_SCL}
   scan: False
   id: i2c_bus
 
+#
+# https://esphome.io/components/uart
+#
+# To the PM1006 particulate sensor inside the Vindriktning enclosure - the
+# original board this config replaces spoke to it at the same baud rate.
+#
+# ${PIN_UART_RX}/${PIN_UART_TX} are likewise outside the C3's strapping set.
+#
 uart:
-  rx_pin: GPIO20
-  tx_pin: GPIO21
+  rx_pin: ${PIN_UART_RX}
+  tx_pin: ${PIN_UART_TX}
   baud_rate: 9600
 
+#
+# https://esphome.io/components/text_sensor
+#
 text_sensor:
+  # Cause of the last restart, straight from esp_reset_reason(). Read
+  # directly rather than through the ESPHome debug component, which kills
+  # the fallback AP's beaconing on this chip - see infinity.yaml's globals:
+  # section for where that was found. Read together with Reset Count: the
+  # reason alone cannot tell you a restart happened while nobody was
+  # watching, and a rising count at a low Device Uptime is the signature of
+  # a device rebooting in a loop.
+  - platform: template
+    id: reset_reason_id
+    name: Reset Reason
+    icon: mdi:restart-alert
+    entity_category: diagnostic
+    update_interval: never
+    lambda: |-
+      switch (esp_reset_reason()) {
+        case ESP_RST_POWERON:   return {"Power on"};
+        case ESP_RST_EXT:       return {"External reset"};
+        case ESP_RST_SW:        return {"Software reset"};
+        case ESP_RST_PANIC:     return {"Panic / exception"};
+        case ESP_RST_INT_WDT:   return {"Interrupt watchdog"};
+        case ESP_RST_TASK_WDT:  return {"Task watchdog"};
+        case ESP_RST_WDT:       return {"Other watchdog"};
+        case ESP_RST_DEEPSLEEP: return {"Deep sleep wake"};
+        case ESP_RST_BROWNOUT:  return {"Brownout"};
+        case ESP_RST_SDIO:      return {"SDIO reset"};
+        case ESP_RST_USB:       return {"USB peripheral"};
+        case ESP_RST_JTAG:      return {"JTAG"};
+        default:                return {"Unknown"};
+      }
+
   - platform: version
     name: ESPHome Version
     icon: mdi:new-box
-  
+
   - platform: template
+    id: firmware_version_id
     name: Firmware Version
     icon: mdi:new-box
     entity_category: diagnostic
-    update_interval: 60s
+    # A compile-time constant: never polled, pushed once from esphome.on_boot
+    # above instead.
+    update_interval: never
     lambda: |-
       return {"$version"};
-  
+
   - platform: wifi_info
     ssid:
       name: SSID
       icon: mdi:wifi-star
+    # Pairs with fast_connect above: with more than one AP on the same SSID,
+    # this is what tells them apart after the fact.
+    bssid:
+      name: BSSID
+      icon: mdi:router-wireless
+    mac_address:
+      name: MAC Address
+      icon: mdi:network-outline
     ip_address:
       name: IP Address
       icon: mdi:ip-network-outline
     dns_address:
       name: DNS Address
       icon: mdi:dns-outline
-  
+
   - platform: template
     name: "Device Uptime"
     entity_category: diagnostic
     device_class: ""
+    update_interval: ${update_interval}
     lambda: |-
           int seconds = (id(uptime_seconds_id).state);
           int days = seconds / (24 * 3600);
@@ -200,27 +311,60 @@ text_sensor:
           return {buf};
     icon: mdi:clock-start
 
+#
+# https://esphome.io/components/binary_sensor
+#
 binary_sensor:
   - platform: status
     name: Connection Status
     icon: mdi:connection
 
+#
+# https://esphome.io/components/button
+#
 button:
   - platform: restart
     id: restart_id
     name: Restart
     icon: mdi:reload
-    
+
+  # Wipes every stored preference, including the WiFi credentials, so the
+  # device comes back up on the fallback AP.
   - platform: factory_reset
     id: factoryreset_id
     name: Factory Reset
     icon: mdi:restart
-    
+
+  # Reboots with all user components disabled, leaving only WiFi and OTA -
+  # the way back in if a bad config takes the device down before it can be
+  # reflashed.
   - platform: safe_mode
     id: safemode_id
     name: Restart (Safe Mode)
     icon: mdi:reload
 
+#
+# https://esphome.io/components/switch/template
+#
+switch:
+  # Brings the broker connection up or down without reflashing.
+  # ALWAYS_OFF, not RESTORE_DEFAULT_OFF: mqtt off is the intended state after
+  # every boot, not merely the initial one.
+  - platform: template
+    id: mqtt_state_id
+    name: MQTT
+    icon: mdi:transit-connection-variant
+    optimistic: True
+    restore_mode: ALWAYS_OFF
+    entity_category: config
+    turn_on_action:
+      - mqtt.enable:
+    turn_off_action:
+      - mqtt.disable:
+
+#
+# https://esphome.io/components/sensor
+#
 sensor:
   - platform: uptime
     id: uptime_seconds_id
@@ -230,7 +374,20 @@ sensor:
     internal: True
     entity_category: diagnostic
     device_class: ""
-    
+
+  # Pushed once from the late esphome.on_boot block, see reset_count_id for
+  # why the increment cannot happen there too.
+  - platform: template
+    id: reset_count_sensor_id
+    name: Reset Count
+    icon: mdi:restart-alert
+    state_class: total_increasing
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: never
+    lambda: |-
+      return id(reset_count_id);
+
   - platform: wifi_signal
     id: wifi_signal_db
     name: WiFi Signal (dBm)
@@ -238,8 +395,9 @@ sensor:
     entity_category: diagnostic
     device_class: ""
     unit_of_measurement: "dBm"
-    update_interval: 60s
-    
+    update_interval: ${update_interval}
+
+  # Derived from WiFi Signal (dBm): -100 dBm -> 0%, -50 dBm -> 100%.
   - platform: copy
     id: wifi_signal_percent
     name: WiFi Signal (%)
@@ -251,38 +409,47 @@ sensor:
     filters:
       - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
 
+  # The Vindriktning's own particulate sensor, read over uart above.
   - platform: pm1006
     pm_2_5:
       name: Particulate Matter 2.5µm Concentration
-    update_interval: 60s
+    update_interval: ${update_interval}
 
+  # Also the barometric pressure input; its own temperature reading only
+  # feeds the median Temperature below and is not shown on its own.
   - platform: bmp280_i2c
     i2c_id: i2c_bus
     address: 0x77
     iir_filter: 16X
-    update_interval: 60s
+    update_interval: ${update_interval}
     temperature:
       name: Temperature (BMP280)
       id: bmp280_temperature
       icon: mdi:thermometer
       oversampling: 16x
+      internal: True
     pressure:
       name: Pressure
       id: bmp280_pressure
       icon: mdi:gauge
 
+  # Its temperature reading likewise only feeds the median below; Humidity
+  # is the one AHT20 value shown directly.
   - platform: aht10
     variant: AHT20
-    update_interval: 60s
+    update_interval: ${update_interval}
     temperature:
       name: Temperature (AHT20)
       id: aht20_temperature
       icon: mdi:thermometer
+      internal: True
     humidity:
       name: Humidity
       id: aht20_humidity
       icon: mdi:water-percent
 
+  # The published Temperature: median of the BMP280 and AHT20 readings,
+  # rather than trusting either sensor alone.
   - platform: combination
     type: median
     name: Temperature
@@ -293,6 +460,7 @@ sensor:
       - source: bmp280_temperature
       - source: aht20_temperature
 
+  # Magnus formula, fed by the median Temperature and the AHT20 Humidity.
   - platform: template
     name: Dew Point
     id: dew_point
@@ -300,9 +468,12 @@ sensor:
     unit_of_measurement: °C
     icon: mdi:thermometer-alert
     accuracy_decimals: 2
+    update_interval: ${update_interval}
     lambda: |-
       return (243.5 * (log(id(aht20_humidity).state / 100) + ((17.67 * id(temperature).state) / (243.5 + id(temperature).state))) / (17.67 - log(id(aht20_humidity).state / 100) - ((17.67 * id(temperature).state) / (243.5 + id(temperature).state))));
 
+  # Grams of water per m³, computed whenever Temperature or Humidity change -
+  # no update_interval option here, it is event-driven rather than polled.
   - platform: absolute_humidity
     name: Absolute Humidity
     id: absolute_humidity_id
